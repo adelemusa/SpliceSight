@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+celery
+redis
+pydantic
+pandas
+scipy
+biopython
+pyensembl
+gseapy
+pytest
+python-multipart
+httpx
+requests
+numpy<2.0

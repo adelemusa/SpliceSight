@@ -1,0 +1,65 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: splicesight_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./GSCs_vs_T98G:/app/GSCs_vs_T98G
+      - pyensembl_cache:/root/.cache/pyensembl
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - MEME_SERVICE_URL=http://meme:8001
+    depends_on:
+      - redis
+      - meme
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery_worker:
+    build:
+      context: ./backend
+    container_name: splicesight_celery
+    volumes:
+      - ./backend:/app
+      - ./GSCs_vs_T98G:/app/GSCs_vs_T98G
+      - pyensembl_cache:/root/.cache/pyensembl
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - MEME_SERVICE_URL=http://meme:8001
+    depends_on:
+      - redis
+      - meme
+      - backend
+    command: celery -A celery_app.celery worker --loglevel=info
+
+  meme:
+    image: splicesight-meme
+    container_name: splicesight_meme
+    ports:
+      - "8001:8001"
+
+  redis:
+    image: redis:7-alpine
+    container_name: splicesight_redis
+    ports:
+      - "6379:6379"
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: splicesight_frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    command: npm run dev -- --host
+
+volumes:
+  pyensembl_cache:
