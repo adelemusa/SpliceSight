@@ -408,7 +408,7 @@ def run_meme_enrichment(
 
     results["sequences_extracted"] = len(sequences)
 
-    if len(sequences) < 3:
+    if len(sequences) < 1:
         return {"error": "Not enough sequences extracted", "motifs": [], **results}
 
     try:
