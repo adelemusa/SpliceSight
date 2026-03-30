@@ -247,7 +247,16 @@ def parse_fimo_output(output_dir: str) -> dict:
 @app.get("/health")
 def health():
     """Health check endpoint."""
-    return {"status": "ok", "service": "meme"}
+    fimo_path = shutil.which("fimo")
+    meme_installed = fimo_path is not None
+
+    return {
+        "status": "ok" if meme_installed else "degraded",
+        "service": "meme",
+        "fimo_available": meme_installed,
+        "fimo_path": fimo_path,
+        "version": "5.5.5" if meme_installed else None,
+    }
 
 
 @app.post("/enrich", response_model=MotifEnrichmentResult)

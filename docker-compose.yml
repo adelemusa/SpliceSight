@@ -37,10 +37,15 @@ services:
     command: celery -A celery_app.celery worker --loglevel=info
 
   meme:
-    image: splicesight-meme
+    image: python:3.11-slim
     container_name: splicesight_meme
     ports:
       - "8001:8001"
+    command: sh -c "pip install fastapi uvicorn && python /app/server.py"
+    volumes:
+      - ./meme_service:/app
+    environment:
+      - PYTHONUNBUFFERED=1
 
   redis:
     image: redis:7-alpine

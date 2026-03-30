@@ -663,13 +663,51 @@ def run_meme_enrichment(
         return results
 
     except httpx.ConnectError:
-        return {
-            "error": f"Cannot connect to MEME service at {MEME_SERVICE_URL}. Is the meme container running?",
-            "motifs": [],
-            **results,
-        }
+        enrichment_results = run_fallback_analysis(sequences, len(sequences), nt_freqs)
+
+        if enrichment_results:
+            pvalues = [r.get("pvalue", 1.0) for r in enrichment_results]
+            adjusted_pvalues = benjamini_hochberg(pvalues, alpha=0.05)
+
+            for i, result in enumerate(enrichment_results):
+                result["adj_pvalue"] = round(adjusted_pvalues[i], 6)
+                result["significant"] = (
+                    result["adj_pvalue"] < 0.05 and result.get("fold_enrichment", 0) > 1
+                )
+                result["significance"] = (
+                    "***"
+                    if result["adj_pvalue"] < 0.001
+                    and result.get("fold_enrichment", 0) > 1
+                    else "**"
+                    if result["adj_pvalue"] < 0.01
+                    and result.get("fold_enrichment", 0) > 1
+                    else "*"
+                    if result["adj_pvalue"] < 0.05
+                    and result.get("fold_enrichment", 0) > 1
+                    else "+"
+                    if result.get("fold_enrichment", 0) > 1
+                    else "ns"
+                )
+
+        enrichment_results.sort(
+            key=lambda x: (-x.get("fold_enrichment", 0), x.get("pvalue", 1))
+        )
+
+        results["motifs"] = enrichment_results
+        results["enriched_count"] = sum(
+            1 for m in enrichment_results if m.get("significant", False)
+        )
+        results["significant_motifs"] = [
+            m["motif"] for m in enrichment_results if m.get("significant", False)
+        ]
+        results["method"] = "Simple Motif Scanning + Fisher's Exact Test"
+
+        if results["motifs"]:
+            results["top_motif"] = results["motifs"][0]
+
+        return results
     except Exception as e:
-        return {"error": f"MEME API error: {str(e)}", "motifs": [], **results}
+        return {"error": f"Motif analysis error: {str(e)}", "motifs": [], **results}
 
 
 def run_fallback_analysis(sequences: list, total_seqs: int, nt_freqs: dict) -> list:
