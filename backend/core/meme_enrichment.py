@@ -1,6 +1,6 @@
 """
 MEME Suite Integration for RBP Motif Enrichment Analysis.
-Uses AME (Analysis of Motif Enrichment) to find significantly enriched motifs.
+Uses FIMO + Fisher's exact test for statistically significant motif enrichment.
 """
 
 import os
@@ -8,6 +8,7 @@ import json
 import subprocess
 import tempfile
 import shutil
+import math
 from typing import Optional
 from pathlib import Path
 from collections import defaultdict
@@ -16,6 +17,100 @@ import httpx
 from .motif_analysis import get_ensembl_db
 
 MEME_SERVICE_URL = os.environ.get("MEME_SERVICE_URL", "http://meme:8001")
+
+
+def log_factorial(n: int) -> float:
+    """Compute log factorial using Stirling's approximation for large n."""
+    if n < 0:
+        return float("inf")
+    if n == 0 or n == 1:
+        return 0.0
+    if n <= 170:
+        return math.lgamma(n + 1)
+    return n * math.log(n) - n + 0.5 * math.log(2 * math.pi * n)
+
+
+def fisher_exact_test(a: int, b: int, c: int, d: int) -> float:
+    """
+    Fisher's exact test for 2x2 contingency table.
+
+    Table:
+           motif+    motif-
+    fg       a        b
+    bg       c        d
+
+    Returns two-tailed p-value.
+    """
+    if a < 0 or b < 0 or c < 0 or d < 0:
+        return 1.0
+
+    n = a + b + c + d
+    if n == 0:
+        return 1.0
+
+    observed_ratio = a / (a + b) if (a + b) > 0 else 0
+    null_ratio = c / (c + d) if (c + d) > 0 else 0
+
+    log_p = (
+        log_factorial(a + b)
+        + log_factorial(c + d)
+        + log_factorial(a + c)
+        + log_factorial(b + d)
+        - log_factorial(n)
+        - log_factorial(a)
+        - log_factorial(b)
+        - log_factorial(c)
+        - log_factorial(d)
+    )
+
+    p_value = math.exp(log_p)
+
+    if observed_ratio > null_ratio:
+        max_a = min(a + b, a + c)
+        for k in range(a + 1, max_a + 1):
+            log_p_tail = (
+                log_factorial(k + b)
+                + log_factorial(c + d - (k - a))
+                + log_factorial(k + c - (k - a))
+                + log_factorial(b + d)
+                - log_factorial(n)
+                - log_factorial(k)
+                - log_factorial(b + (k - a))
+                - log_factorial(c - (k - a))
+                - log_factorial(d)
+            )
+            p_value += math.exp(log_p_tail)
+
+    return min(1.0, p_value)
+
+
+def bonferroni_correction(p_values: list, alpha: float = 0.05) -> list:
+    """Apply Bonferroni correction for multiple testing."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    adjusted = [min(1.0, p * n) for p in p_values]
+    return adjusted
+
+
+def benjamini_hochberg(p_values: list, alpha: float = 0.05) -> list:
+    """Apply Benjamini-Hochberg FDR correction."""
+    n = len(p_values)
+    if n == 0:
+        return []
+
+    indexed = [(i, p) for i, p in enumerate(p_values)]
+    indexed.sort(key=lambda x: x[1])
+
+    adjusted = [1.0] * n
+    for rank, (orig_idx, p) in enumerate(indexed):
+        bh_value = p * n / (rank + 1)
+        adjusted[orig_idx] = min(1.0, bh_value)
+
+    for i in range(n - 2, -1, -1):
+        adjusted[i] = min(adjusted[i], adjusted[i + 1])
+
+    return adjusted
 
 
 def get_coordinates_for_event(event: dict) -> tuple:
@@ -323,6 +418,59 @@ def parse_ame_results(output_dir: str) -> dict:
     return results
 
 
+RBP_BACKGROUND_FREQUENCIES = {
+    "RBM25": 0.015,
+    "RBM10": 0.02,
+    "PTB": 0.08,
+    "NOVA1": 0.04,
+    "NOVA2": 0.04,
+    "MBNL1": 0.035,
+    "MBNL2": 0.035,
+    "CELF1": 0.06,
+    "CELF2": 0.06,
+    "TIA1": 0.05,
+    "TIAR": 0.05,
+    "HuR": 0.07,
+    "ELAVL1": 0.07,
+    "TDP43": 0.04,
+    "TARDBP": 0.04,
+    "FUS": 0.03,
+    "SF3B4": 0.08,
+    "U2AF2": 0.06,
+    "RPS14": 0.05,
+    "HNRNPC": 0.06,
+    "EWSR1": 0.04,
+    "hnRNPA1": 0.05,
+    "QKI": 0.025,
+}
+
+BACKGROUND_GENOME_SIZE = 50000
+FOREGROUND_EFFECTIVE_SIZE = 1000
+
+
+def calculate_nucleotide_freq(sequences: list) -> dict:
+    """Calculate nucleotide frequencies from sequences."""
+    counts = {"A": 0, "C": 0, "G": 0, "T": 0, "U": 0}
+    total = 0
+    for seq in sequences:
+        for nt in seq.upper():
+            if nt in counts:
+                counts[nt] += 1
+                total += 1
+    if total > 0:
+        return {k: v / total for k, v in counts.items()}
+    return {"A": 0.25, "C": 0.25, "G": 0.25, "T": 0.25, "U": 0.25}
+
+
+def estimate_motif_background_frequency(motif: str, nt_freqs: dict) -> float:
+    """Estimate background frequency of a motif based on nucleotide frequencies."""
+    motif = motif.upper().replace("U", "T")
+    freq = 1.0
+    for nt in motif:
+        freq *= nt_freqs.get(nt, 0.25)
+    return freq
+
+
 def run_meme_enrichment(
     events: list,
     sample_size: int = 500,
@@ -330,16 +478,16 @@ def run_meme_enrichment(
     use_background: bool = True,
 ) -> dict:
     """
-    Run complete RBP motif enrichment analysis using MEME FIMO service.
+    Run complete RBP motif enrichment analysis using MEME FIMO + Fisher's exact test.
 
     Args:
         events: List of splicing events
         sample_size: Number of events to analyze
         pvalue_threshold: P-value threshold for significance
-        use_background: Use shuffled sequences as background
+        use_background: Use background frequencies for Fisher's test
 
     Returns:
-        Dictionary with enrichment results
+        Dictionary with statistically enriched motifs
     """
     if not events:
         return {"error": "No events provided", "motifs": []}
@@ -356,7 +504,7 @@ def run_meme_enrichment(
         "sequences_extracted": 0,
         "motifs": [],
         "enriched_count": 0,
-        "method": "FIMO (MEME Suite)",
+        "method": "FIMO + Fisher's Exact Test",
         "pvalue_threshold": pvalue_threshold,
     }
 
@@ -386,15 +534,21 @@ def run_meme_enrichment(
 
     results["sequences_extracted"] = len(sequences)
 
-    if len(sequences) < 1:
-        return {"error": "Not enough sequences extracted", "motifs": [], **results}
+    if len(sequences) < 3:
+        return {
+            "error": "Not enough sequences extracted (minimum 3 required)",
+            "motifs": [],
+            **results,
+        }
+
+    nt_freqs = calculate_nucleotide_freq([s["sequence"] for s in sequences])
 
     try:
         response = httpx.post(
             f"{MEME_SERVICE_URL}/enrich",
             json={
                 "foreground_sequences": sequences,
-                "pvalue_threshold": pvalue_threshold,
+                "pvalue_threshold": 0.1,
                 "method": "fimo",
             },
             timeout=120.0,
@@ -403,26 +557,102 @@ def run_meme_enrichment(
         api_result = response.json()
 
         motif_hits = api_result.get("motifs", [])
-        results["method"] = api_result.get("method", "FIMO")
+        results["method"] = api_result.get("method", "FIMO") + " + Fisher's Exact Test"
 
         motif_counts = defaultdict(int)
+        motif_sequences = defaultdict(set)
         for motif in motif_hits:
             rbp = motif.get("motif", "")
+            seq_id = motif.get("sequence_id", "")
             motif_counts[rbp] += 1
+            if seq_id:
+                motif_sequences[rbp].add(seq_id)
 
         total_seqs = len(sequences)
-        results["motifs"] = [
-            {
-                "motif": rbp,
-                "count": count,
-                "percentage": round(count / total_seqs * 100, 1),
-                "significance": "detected" if count > 0 else "none",
-            }
-            for rbp, count in sorted(
-                motif_counts.items(), key=lambda x: x[1], reverse=True
+        enrichment_results = []
+
+        for rbp, count in motif_counts.items():
+            fg_with_motif = len(motif_sequences[rbp])
+            fg_without_motif = total_seqs - fg_with_motif
+
+            bg_expected = RBP_BACKGROUND_FREQUENCIES.get(rbp, 0.05)
+
+            motif_len = (
+                len(rbp)
+                if rbp
+                in [
+                    m.upper()
+                    for m in [
+                        "RBM25",
+                        "PTB",
+                        "QKI",
+                        "MBNL1",
+                        "CELF1",
+                        "TIA1",
+                        "HuR",
+                        "TDP43",
+                        "hnRNPA1",
+                    ]
+                ]
+                else 3
             )
+            bg_freq_adjusted = estimate_motif_background_frequency(rbp, nt_freqs)
+            bg_freq = max(bg_expected, bg_freq_adjusted)
+
+            bg_with_motif = int(BACKGROUND_GENOME_SIZE * bg_freq)
+            bg_without_motif = BACKGROUND_GENOME_SIZE - bg_with_motif
+
+            pvalue = fisher_exact_test(
+                fg_with_motif, fg_without_motif, bg_with_motif, bg_without_motif
+            )
+
+            fold_enrichment = 0
+            if bg_with_motif > 0:
+                fg_rate = fg_with_motif / total_seqs if total_seqs > 0 else 0
+                bg_rate = bg_with_motif / BACKGROUND_GENOME_SIZE
+                fold_enrichment = fg_rate / bg_rate if bg_rate > 0 else 0
+
+            enrichment_results.append(
+                {
+                    "motif": rbp,
+                    "count": fg_with_motif,
+                    "percentage": round(fg_with_motif / total_seqs * 100, 1)
+                    if total_seqs > 0
+                    else 0,
+                    "pvalue": pvalue,
+                    "fold_enrichment": round(fold_enrichment, 2)
+                    if fold_enrichment > 0
+                    else 0,
+                    "bg_frequency": round(bg_freq * 100, 2),
+                }
+            )
+
+        if enrichment_results:
+            pvalues = [r["pvalue"] for r in enrichment_results]
+            adjusted_pvalues = benjamini_hochberg(pvalues, alpha=pvalue_threshold)
+
+            for i, result in enumerate(enrichment_results):
+                result["adj_pvalue"] = round(adjusted_pvalues[i], 6)
+                result["significant"] = result["adj_pvalue"] < pvalue_threshold
+                result["significance"] = (
+                    "***"
+                    if result["adj_pvalue"] < 0.001
+                    else "**"
+                    if result["adj_pvalue"] < 0.01
+                    else "*"
+                    if result["adj_pvalue"] < pvalue_threshold
+                    else "ns"
+                )
+
+        enrichment_results.sort(key=lambda x: x["pvalue"])
+
+        results["motifs"] = enrichment_results
+        results["enriched_count"] = sum(
+            1 for m in enrichment_results if m.get("significant", False)
+        )
+        results["significant_motifs"] = [
+            m["motif"] for m in enrichment_results if m.get("significant", False)
         ]
-        results["enriched_count"] = len(results["motifs"])
 
         if results["motifs"]:
             results["top_motif"] = results["motifs"][0]

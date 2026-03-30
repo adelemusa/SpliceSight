@@ -355,18 +355,24 @@ def run_motif_analysis(events: list, sample_size: int = 100) -> dict:
                         }
                     )
 
-            for idx, motif in enumerate(meme_results.get("motifs", [])[:15]):
+            for idx, motif in enumerate(meme_results.get("motifs", [])[:20]):
                 results["enriched_motifs"].append(
                     {
                         "rbp": motif.get("motif", ""),
                         "count": motif.get("count", 0),
                         "percentage": motif.get("percentage", 0),
+                        "pvalue": motif.get("pvalue", 1.0),
+                        "adj_pvalue": motif.get("adj_pvalue", 1.0),
+                        "fold_enrichment": motif.get("fold_enrichment", 0),
+                        "significant": motif.get("significant", False),
+                        "significance": motif.get("significance", "ns"),
                         "rank": idx + 1,
                     }
                 )
 
             results["method"] = meme_results.get("method", "FIMO")
             results["enriched_count"] = meme_results.get("enriched_count", 0)
+            results["significant_motifs"] = meme_results.get("significant_motifs", [])
 
             for event_type in ["SE", "A3SS", "A5SS", "MXE", "RI"]:
                 results["by_event_type"][event_type] = {
