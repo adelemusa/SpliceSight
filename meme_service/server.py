@@ -179,69 +179,101 @@ def write_motifs(output_path: str) -> str:
     return output_path
 
 
-def run_fimo(
-    sequences_fa: str,
+def run_ame(
+    foreground_fa: str,
+    background_fa: str,
     motif_file: str,
     output_dir: str,
     pvalue: float = 0.05,
 ) -> dict:
-    """Run FIMO (Find Individual Motif Occurrences)."""
+    """Run AME (Analysis of Motif Enrichment)."""
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
+    os.makedirs(output_dir)
 
     cmd = [
-        "fimo",
+        "ame",
         "--o",
         output_dir,
-        "--thresh",
-        str(pvalue),
+        "--motif",
         motif_file,
-        sequences_fa,
+        "--bgfile",
+        background_fa,
+        "--control",
+        "--method",
+        "fisher",
+        "--pvalue",
+        str(pvalue),
+        "--hit-lof-fraction",
+        "0.02",
+        "--max-stored-scores",
+        "100000",
+        foreground_fa,
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if result.returncode != 0:
-            return {"error": result.stderr, "motifs": []}
+            return {"error": result.stderr, "motifs": [], "enriched_count": 0}
 
-        return parse_fimo_output(output_dir)
+        return parse_ame_output(output_dir)
 
     except subprocess.TimeoutExpired:
-        return {"error": "FIMO timed out", "motifs": []}
+        return {"error": "AME timed out", "motifs": [], "enriched_count": 0}
     except Exception as e:
-        return {"error": str(e), "motifs": []}
+        return {"error": str(e), "motifs": [], "enriched_count": 0}
 
 
-def parse_fimo_output(output_dir: str) -> dict:
-    """Parse FIMO output TSV file."""
-    tsv_path = os.path.join(output_dir, "fimo.tsv")
+def parse_ame_output(output_dir: str) -> dict:
+    """Parse AME output (HTML or TSV)."""
+    ame_tsv = os.path.join(output_dir, "ame.tsv")
+    ame_html = os.path.join(output_dir, "ame.html")
 
-    if not os.path.exists(tsv_path):
-        for root, dirs, files in os.walk(output_dir):
-            if "fimo.tsv" in files:
-                tsv_path = os.path.join(root, "fimo.tsv")
-                break
+    motifs = []
 
-    motif_counts = {}
-    if os.path.exists(tsv_path):
-        with open(tsv_path, "r") as f:
-            header = f.readline()  # Skip header
+    if os.path.exists(ame_tsv):
+        with open(ame_tsv, "r") as f:
+            header = f.readline().strip().split("\t")
             for line in f:
                 fields = line.strip().split("\t")
-                if len(fields) >= 2:
-                    motif_name = fields[0] if fields[0] else ""
-                    if motif_name:
-                        motif_counts[motif_name] = motif_counts.get(motif_name, 0) + 1
+                if len(fields) >= 5:
+                    motif_name = fields[1] if fields[1] else ""
+                    pvalue = fields[3] if len(fields) > 3 else "1"
+                    evalue = fields[4] if len(fields) > 4 else "1"
 
-    motifs = [
-        {"motif": name, "count": count, "source": "FIMO"}
-        for name, count in sorted(
-            motif_counts.items(), key=lambda x: x[1], reverse=True
-        )
-    ]
+                    try:
+                        motifs.append(
+                            {
+                                "motif": motif_name,
+                                "pvalue": float(pvalue),
+                                "evalue": float(evalue),
+                                "source": "AME",
+                            }
+                        )
+                    except ValueError:
+                        continue
 
-    return {"motifs": motifs, "enriched_count": len(motifs)}
+    motifs.sort(key=lambda x: x.get("pvalue", 1))
+
+    return {"motifs": motifs, "enriched_count": len(motifs), "method": "AME"}
+
+
+def create_background_from_foreground(sequences: List[dict], output_path: str) -> int:
+    """Create a shuffled background from foreground sequences."""
+    import random
+
+    count = 0
+    with open(output_path, "w") as f:
+        for seq in sequences:
+            if "sequence" in seq and seq["sequence"]:
+                seq_id = seq.get("id", f"bg_{count}")
+                sequence = seq["sequence"]
+                shuffled = list(sequence)
+                random.shuffle(shuffled)
+                f.write(f">{seq_id}_shuffled\n{''.join(shuffled)}\n")
+                count += 1
+    return count
 
 
 @app.get("/health")
@@ -262,21 +294,23 @@ def health():
 @app.post("/enrich", response_model=MotifEnrichmentResult)
 def enrich(request: MotifEnrichmentRequest):
     """
-    Run motif scanning analysis using FIMO.
+    Run motif enrichment analysis using AME (Analysis of Motif Enrichment).
+    AME compares foreground sequences against background to find statistically enriched motifs.
 
     Args:
         request: MotifEnrichmentRequest with sequences and parameters
 
     Returns:
-        MotifEnrichmentResult with enriched motifs
+        MotifEnrichmentResult with enriched motifs and p-values
     """
     if not request.foreground_sequences:
         raise HTTPException(status_code=400, detail="No foreground sequences provided")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        fg_path = os.path.join(tmpdir, "sequences.fa")
+        fg_path = os.path.join(tmpdir, "foreground.fa")
+        bg_path = os.path.join(tmpdir, "background.fa")
         motif_path = os.path.join(tmpdir, "motifs.meme")
-        out_dir = os.path.join(tmpdir, "fimo_output")
+        out_dir = os.path.join(tmpdir, "ame_output")
 
         fg_count = write_fasta(request.foreground_sequences, fg_path)
         if fg_count == 0:
@@ -286,8 +320,16 @@ def enrich(request: MotifEnrichmentRequest):
 
         write_motifs(motif_path)
 
-        result = run_fimo(
+        if request.background_sequences:
+            bg_count = write_fasta(request.background_sequences, bg_path)
+            if bg_count == 0:
+                create_background_from_foreground(request.foreground_sequences, bg_path)
+        else:
+            create_background_from_foreground(request.foreground_sequences, bg_path)
+
+        result = run_ame(
             fg_path,
+            bg_path,
             motif_path,
             out_dir,
             request.pvalue_threshold,
@@ -296,27 +338,7 @@ def enrich(request: MotifEnrichmentRequest):
         return MotifEnrichmentResult(
             motifs=result.get("motifs", []),
             enriched_count=result.get("enriched_count", 0),
-            method="FIMO",
-            error=result.get("error"),
-        )
-
-        if request.background_sequences:
-            bg_count = write_fasta(request.background_sequences, bg_path)
-            if bg_count == 0:
-                bg_path = fg_path
-        else:
-            bg_path = fg_path
-
-        write_motifs(motif_path)
-
-        result = run_ame(
-            fg_path, bg_path, motif_path, out_dir, request.pvalue_threshold
-        )
-
-        return MotifEnrichmentResult(
-            motifs=result.get("motifs", []),
-            enriched_count=result.get("enriched_count", 0),
-            method="AME",
+            method=result.get("method", "AME"),
             error=result.get("error"),
         )
 
