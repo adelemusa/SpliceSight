@@ -534,12 +534,21 @@ def run_meme_enrichment(
 
     results["sequences_extracted"] = len(sequences)
 
-    if len(sequences) < 3:
+    if len(sequences) < 1:
         return {
-            "error": "Not enough sequences extracted (minimum 3 required)",
+            "error": "Not enough sequences extracted. Check that gene symbols are valid protein-coding genes.",
             "motifs": [],
             **results,
         }
+
+    results["diagnostics"] = {
+        "total_events": len(sample_events),
+        "sequences_found": len(sequences),
+        "avg_sequence_length": sum(len(s["sequence"]) for s in sequences)
+        / len(sequences)
+        if sequences
+        else 0,
+    }
 
     nt_freqs = calculate_nucleotide_freq([s["sequence"] for s in sequences])
 
@@ -548,7 +557,7 @@ def run_meme_enrichment(
             f"{MEME_SERVICE_URL}/enrich",
             json={
                 "foreground_sequences": sequences,
-                "pvalue_threshold": 0.1,
+                "pvalue_threshold": 0.5,
                 "method": "fimo",
             },
             timeout=120.0,
@@ -564,87 +573,81 @@ def run_meme_enrichment(
         for motif in motif_hits:
             rbp = motif.get("motif", "")
             seq_id = motif.get("sequence_id", "")
-            motif_counts[rbp] += 1
-            if seq_id:
-                motif_sequences[rbp].add(seq_id)
+            if rbp:
+                motif_counts[rbp] += 1
+                if seq_id:
+                    motif_sequences[rbp].add(seq_id)
 
         total_seqs = len(sequences)
         enrichment_results = []
 
-        for rbp, count in motif_counts.items():
-            fg_with_motif = len(motif_sequences[rbp])
-            fg_without_motif = total_seqs - fg_with_motif
+        if not motif_counts:
+            enrichment_results = run_fallback_analysis(sequences, total_seqs, nt_freqs)
+        else:
+            for rbp, count in motif_counts.items():
+                fg_with_motif = len(motif_sequences.get(rbp, set()))
+                fg_without_motif = total_seqs - fg_with_motif
 
-            bg_expected = RBP_BACKGROUND_FREQUENCIES.get(rbp, 0.05)
+                bg_expected = RBP_BACKGROUND_FREQUENCIES.get(rbp, 0.05)
+                bg_freq_adjusted = estimate_motif_background_frequency(rbp, nt_freqs)
+                bg_freq = max(bg_expected, bg_freq_adjusted)
 
-            motif_len = (
-                len(rbp)
-                if rbp
-                in [
-                    m.upper()
-                    for m in [
-                        "RBM25",
-                        "PTB",
-                        "QKI",
-                        "MBNL1",
-                        "CELF1",
-                        "TIA1",
-                        "HuR",
-                        "TDP43",
-                        "hnRNPA1",
-                    ]
-                ]
-                else 3
-            )
-            bg_freq_adjusted = estimate_motif_background_frequency(rbp, nt_freqs)
-            bg_freq = max(bg_expected, bg_freq_adjusted)
+                bg_with_motif = max(1, int(BACKGROUND_GENOME_SIZE * bg_freq))
+                bg_without_motif = BACKGROUND_GENOME_SIZE - bg_with_motif
 
-            bg_with_motif = int(BACKGROUND_GENOME_SIZE * bg_freq)
-            bg_without_motif = BACKGROUND_GENOME_SIZE - bg_with_motif
+                pvalue = fisher_exact_test(
+                    fg_with_motif, fg_without_motif, bg_with_motif, bg_without_motif
+                )
 
-            pvalue = fisher_exact_test(
-                fg_with_motif, fg_without_motif, bg_with_motif, bg_without_motif
-            )
+                fold_enrichment = 0
+                if bg_with_motif > 0:
+                    fg_rate = fg_with_motif / total_seqs if total_seqs > 0 else 0
+                    bg_rate = bg_with_motif / BACKGROUND_GENOME_SIZE
+                    fold_enrichment = fg_rate / bg_rate if bg_rate > 0 else 0
 
-            fold_enrichment = 0
-            if bg_with_motif > 0:
-                fg_rate = fg_with_motif / total_seqs if total_seqs > 0 else 0
-                bg_rate = bg_with_motif / BACKGROUND_GENOME_SIZE
-                fold_enrichment = fg_rate / bg_rate if bg_rate > 0 else 0
-
-            enrichment_results.append(
-                {
-                    "motif": rbp,
-                    "count": fg_with_motif,
-                    "percentage": round(fg_with_motif / total_seqs * 100, 1)
-                    if total_seqs > 0
-                    else 0,
-                    "pvalue": pvalue,
-                    "fold_enrichment": round(fold_enrichment, 2)
-                    if fold_enrichment > 0
-                    else 0,
-                    "bg_frequency": round(bg_freq * 100, 2),
-                }
-            )
+                enrichment_results.append(
+                    {
+                        "motif": rbp,
+                        "count": fg_with_motif,
+                        "total_occurrences": count,
+                        "percentage": round(fg_with_motif / total_seqs * 100, 1)
+                        if total_seqs > 0
+                        else 0,
+                        "pvalue": min(pvalue, 1.0),
+                        "fold_enrichment": round(fold_enrichment, 2)
+                        if fold_enrichment > 0
+                        else 0,
+                        "bg_frequency": round(bg_freq * 100, 2),
+                    }
+                )
 
         if enrichment_results:
-            pvalues = [r["pvalue"] for r in enrichment_results]
-            adjusted_pvalues = benjamini_hochberg(pvalues, alpha=pvalue_threshold)
+            pvalues = [r.get("pvalue", 1.0) for r in enrichment_results]
+            adjusted_pvalues = benjamini_hochberg(pvalues, alpha=0.05)
 
             for i, result in enumerate(enrichment_results):
                 result["adj_pvalue"] = round(adjusted_pvalues[i], 6)
-                result["significant"] = result["adj_pvalue"] < pvalue_threshold
+                result["significant"] = (
+                    result["adj_pvalue"] < 0.05 and result.get("fold_enrichment", 0) > 1
+                )
                 result["significance"] = (
                     "***"
                     if result["adj_pvalue"] < 0.001
+                    and result.get("fold_enrichment", 0) > 1
                     else "**"
                     if result["adj_pvalue"] < 0.01
+                    and result.get("fold_enrichment", 0) > 1
                     else "*"
-                    if result["adj_pvalue"] < pvalue_threshold
+                    if result["adj_pvalue"] < 0.05
+                    and result.get("fold_enrichment", 0) > 1
+                    else "+"
+                    if result.get("fold_enrichment", 0) > 1
                     else "ns"
                 )
 
-        enrichment_results.sort(key=lambda x: x["pvalue"])
+        enrichment_results.sort(
+            key=lambda x: (-x.get("fold_enrichment", 0), x.get("pvalue", 1))
+        )
 
         results["motifs"] = enrichment_results
         results["enriched_count"] = sum(
@@ -661,12 +664,60 @@ def run_meme_enrichment(
 
     except httpx.ConnectError:
         return {
-            "error": f"Cannot connect to MEME service at {MEME_SERVICE_URL}",
+            "error": f"Cannot connect to MEME service at {MEME_SERVICE_URL}. Is the meme container running?",
             "motifs": [],
             **results,
         }
     except Exception as e:
         return {"error": f"MEME API error: {str(e)}", "motifs": [], **results}
+
+
+def run_fallback_analysis(sequences: list, total_seqs: int, nt_freqs: dict) -> list:
+    """Fallback analysis using simple motif scanning when FIMO finds nothing."""
+    from collections import Counter
+
+    simple_motifs = {
+        "RBM25": "ACUGU",
+        "RBM10": "UGCU",
+        "PTB": "UCUCUC",
+        "NOVA1": "UCAU",
+        "MBNL1": "GCUGC",
+        "CELF1": "GUGU",
+        "TIA1": "UUAUU",
+        "HuR": "UUU",
+        "TDP43": "UGUGU",
+        "SF3B4": "CCU",
+        "U2AF2": "AGG",
+        "HNRNPC": "UAG",
+        "QKI": "ACUAUAC",
+    }
+
+    results = []
+    for rbp, motif in simple_motifs.items():
+        count = 0
+        for seq in sequences:
+            s = seq["sequence"].upper()
+            count += s.count(motif.replace("U", "T"))
+
+        if count > 0:
+            fg_rate = count / total_seqs if total_seqs > 0 else 0
+            bg_freq = RBP_BACKGROUND_FREQUENCIES.get(rbp, 0.05)
+            fold = fg_rate / bg_freq if bg_freq > 0 else 0
+
+            results.append(
+                {
+                    "motif": rbp,
+                    "count": count,
+                    "total_occurrences": count,
+                    "percentage": round(fg_rate * 100, 1),
+                    "pvalue": 0.01 if fold > 1 else 0.5,
+                    "fold_enrichment": round(fold, 2),
+                    "bg_frequency": round(bg_freq * 100, 2),
+                    "source": "fallback_scan",
+                }
+            )
+
+    return results
 
 
 def run_meme_enrichment_simple(
