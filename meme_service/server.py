@@ -181,43 +181,36 @@ def write_motifs(output_path: str) -> str:
 
 def run_ame(
     foreground_fa: str,
-    background_fa: str,
+    background_fa: Optional[str],
     motif_file: str,
     output_dir: str,
     pvalue: float = 0.05,
 ) -> dict:
-    """Run AME (Analysis of Motif Enrichment)."""
+    """Run AME (Analysis of Motif Enrichment) using --text output."""
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
-    cmd = [
-        "ame",
-        "--o",
-        output_dir,
-        "--motif",
-        motif_file,
-        "--bgfile",
-        background_fa,
-        "--control",
-        "--method",
-        "fisher",
-        "--pvalue",
-        str(pvalue),
-        "--hit-lof-fraction",
-        "0.02",
-        "--max-stored-scores",
-        "100000",
-        foreground_fa,
-    ]
+    if background_fa and os.path.exists(background_fa):
+        control_opt = ["--control", background_fa]
+    else:
+        control_opt = ["--control", "--shuffle--"]
+
+    cmd = (
+        [
+            "ame",
+            "--text",
+        ]
+        + control_opt
+        + [
+            foreground_fa,
+            motif_file,
+        ]
+    )
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
-        if result.returncode != 0:
-            return {"error": result.stderr, "motifs": [], "enriched_count": 0}
-
-        return parse_ame_output(output_dir)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        return parse_ame_text_output(proc.stdout)
 
     except subprocess.TimeoutExpired:
         return {"error": "AME timed out", "motifs": [], "enriched_count": 0}
@@ -225,10 +218,41 @@ def run_ame(
         return {"error": str(e), "motifs": [], "enriched_count": 0}
 
 
+def parse_ame_text_output(text_output: str) -> dict:
+    """Parse AME text output (from --text option)."""
+    motifs = []
+
+    for line in text_output.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        fields = line.split("\t")
+        if len(fields) >= 6 and fields[0].isdigit():
+            try:
+                motif_name = fields[2] if len(fields) > 2 else ""
+                pvalue = float(fields[5]) if len(fields) > 5 else 1.0
+                evalue = float(fields[6]) if len(fields) > 6 else 1.0
+
+                motifs.append(
+                    {
+                        "motif": motif_name,
+                        "pvalue": pvalue,
+                        "evalue": evalue,
+                        "source": "AME",
+                    }
+                )
+            except (ValueError, IndexError):
+                continue
+
+    motifs.sort(key=lambda x: x.get("pvalue", 1))
+
+    return {"motifs": motifs, "enriched_count": len(motifs), "method": "AME"}
+
+
 def parse_ame_output(output_dir: str) -> dict:
     """Parse AME output (HTML or TSV)."""
     ame_tsv = os.path.join(output_dir, "ame.tsv")
-    ame_html = os.path.join(output_dir, "ame.html")
 
     motifs = []
 
@@ -306,26 +330,35 @@ def enrich(request: MotifEnrichmentRequest):
     if not request.foreground_sequences:
         raise HTTPException(status_code=400, detail="No foreground sequences provided")
 
+    fg_sequences = [s for s in request.foreground_sequences if s.get("sequence")]
+    if len(fg_sequences) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"AME requires at least 3 sequences, but only {len(fg_sequences)} were provided",
+        )
+
     with tempfile.TemporaryDirectory() as tmpdir:
         fg_path = os.path.join(tmpdir, "foreground.fa")
         bg_path = os.path.join(tmpdir, "background.fa")
         motif_path = os.path.join(tmpdir, "motifs.meme")
         out_dir = os.path.join(tmpdir, "ame_output")
 
-        fg_count = write_fasta(request.foreground_sequences, fg_path)
-        if fg_count == 0:
+        fg_count = write_fasta(fg_sequences, fg_path)
+        if fg_count < 3:
             raise HTTPException(
-                status_code=400, detail="No valid sequences in foreground"
+                status_code=400,
+                detail=f"AME requires at least 3 valid sequences, but only {fg_count} were provided",
             )
 
         write_motifs(motif_path)
 
-        if request.background_sequences:
-            bg_count = write_fasta(request.background_sequences, bg_path)
-            if bg_count == 0:
-                create_background_from_foreground(request.foreground_sequences, bg_path)
+        bg_sequences = request.background_sequences or []
+        if len(bg_sequences) >= 3:
+            bg_count = write_fasta(bg_sequences, bg_path)
+            if bg_count < 3:
+                bg_path = None
         else:
-            create_background_from_foreground(request.foreground_sequences, bg_path)
+            bg_path = None
 
         result = run_ame(
             fg_path,
