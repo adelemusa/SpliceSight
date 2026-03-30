@@ -498,3 +498,81 @@ def run_motif_analysis(events: list, sample_size: int = 100) -> dict:
         )
 
     return results
+
+
+def run_rmaps_analysis(
+    events: list,
+    upregulated_threshold: float = 0.05,
+    dpsi_threshold: float = 0.1,
+    background_dpsi_max: float = 0.05,
+    background_fdr_min: float = 0.5,
+    sample_size: int = 500,
+) -> dict:
+    """
+    Run rMAPS-style RBP motif enrichment analysis.
+
+    This method follows the rMAPS workflow:
+    1. Separate events into upregulated, downregulated, and background
+    2. Extract genomic regions around splicing events
+    3. Calculate motif density using sliding windows
+    4. Compare against background using Wilcoxon rank sum test
+    5. Generate RNA maps for visualization
+
+    Args:
+        events: List of splicing events with coordinates
+        upregulated_threshold: FDR threshold for significant events
+        dpsi_threshold: Minimum |ΔPSI| for significant events
+        background_dpsi_max: Maximum |ΔPSI| for background events
+        background_fdr_min: Minimum FDR for background events
+        sample_size: Maximum events per group to analyze
+
+    Returns:
+        Dictionary with enriched RBPs, RNA map data, and statistics
+    """
+    try:
+        from .rmaps_style import (
+            run_rmaps_style_analysis,
+            extract_event_regions,
+            calculate_motif_scores_for_event,
+            RBP_MOTIFS,
+        )
+    except ImportError:
+        return {
+            "error": "rMAPS analysis module not available",
+            "motifs": [],
+            "rna_map": {},
+        }
+
+    if not events:
+        return {"error": "No events provided", "motifs": [], "rna_map": {}}
+
+    upregulated = []
+    downregulated = []
+    background = []
+
+    for event in events:
+        fdr = event.get("fdr", 1.0)
+        dpsi = event.get("dpsi", 0)
+
+        if fdr < upregulated_threshold and dpsi >= dpsi_threshold:
+            upregulated.append(event)
+        elif fdr < upregulated_threshold and dpsi <= -dpsi_threshold:
+            downregulated.append(event)
+        elif fdr > background_fdr_min and abs(dpsi) < background_dpsi_max:
+            background.append(event)
+
+    results = run_rmaps_style_analysis(
+        upregulated_events=upregulated,
+        downregulated_events=downregulated,
+        background_events=background,
+        sample_size=sample_size,
+    )
+
+    results["event_counts"] = {
+        "upregulated": len(upregulated),
+        "downregulated": len(downregulated),
+        "background": len(background),
+        "total_analyzed": len(upregulated) + len(downregulated),
+    }
+
+    return results

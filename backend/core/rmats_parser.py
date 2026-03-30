@@ -376,10 +376,25 @@ def parse_rmats_files(
 
     motif_results = run_motif_analysis(events_data, sample_size=len(events_data))
 
+    try:
+        from .motif_analysis import run_rmaps_analysis
+
+        rmaps_results = run_rmaps_analysis(
+            events_data,
+            upregulated_threshold=fdr_threshold,
+            dpsi_threshold=dpsi_threshold,
+            background_dpsi_max=0.05,
+            background_fdr_min=0.5,
+            sample_size=500,
+        )
+    except Exception as e:
+        rmaps_results = {"error": str(e), "motifs": []}
+
     return {
         "events": events_data,
         "enrichment": enrichment_results,
         "motif_analysis": motif_results,
+        "rmaps_analysis": rmaps_results,
         "summary": {
             "total_events": len(events),
             "significant_genes": len(significant_genes),
