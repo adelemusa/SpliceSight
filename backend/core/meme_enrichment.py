@@ -195,30 +195,6 @@ def extract_sequence_for_gene(
         return None
 
 
-def get_coordinates_for_event(event: dict) -> tuple:
-    """Extract coordinates from event based on event type."""
-    coords = event.get("coordinates", {})
-    event_type = event.get("event_type", "SE")
-
-    if event_type == "SE":
-        start = coords.get("start", 0)
-        end = coords.get("end", 0)
-    elif event_type in ["A3SS", "A5SS"]:
-        start = coords.get("long_start", coords.get("start", 0))
-        end = coords.get("long_end", coords.get("end", 0))
-    elif event_type == "MXE":
-        start = coords.get("first_start", coords.get("start", 0))
-        end = coords.get("first_end", coords.get("end", 0))
-    elif event_type == "RI":
-        start = coords.get("ri_start", coords.get("start", 0))
-        end = coords.get("ri_end", coords.get("end", 0))
-    else:
-        start = coords.get("start", 0)
-        end = coords.get("end", 0)
-
-    return start, end
-
-
 def write_sequences_to_fasta(events: list, output_path: str, ensembl_db=None) -> int:
     """Write event sequences to FASTA file. Returns number of sequences written."""
     count = 0
@@ -354,7 +330,7 @@ def run_meme_enrichment(
     use_background: bool = True,
 ) -> dict:
     """
-    Run complete RBP motif enrichment analysis using MEME AME service.
+    Run complete RBP motif enrichment analysis using MEME FIMO service.
 
     Args:
         events: List of splicing events
@@ -380,11 +356,12 @@ def run_meme_enrichment(
         "sequences_extracted": 0,
         "motifs": [],
         "enriched_count": 0,
-        "method": "AME (MEME Suite API)",
+        "method": "FIMO (MEME Suite)",
         "pvalue_threshold": pvalue_threshold,
     }
 
     sequences = []
+    sequence_ids = set()
     for i, event in enumerate(sample_events):
         gene = event.get("gene_symbol", "")
         if not gene:
@@ -402,9 +379,10 @@ def run_meme_enrichment(
         )
 
         if sequence and len(sequence) > 10:
-            sequences.append(
-                {"id": f"{event.get('id', i)}_{gene}", "sequence": sequence}
-            )
+            seq_id = f"{event.get('id', i)}_{gene}"
+            if seq_id not in sequence_ids:
+                sequences.append({"id": seq_id, "sequence": sequence})
+                sequence_ids.add(seq_id)
 
     results["sequences_extracted"] = len(sequences)
 
@@ -416,7 +394,7 @@ def run_meme_enrichment(
             f"{MEME_SERVICE_URL}/enrich",
             json={
                 "foreground_sequences": sequences,
-                "pvalue_threshold": 1.0,
+                "pvalue_threshold": pvalue_threshold,
                 "method": "fimo",
             },
             timeout=120.0,
@@ -432,11 +410,13 @@ def run_meme_enrichment(
             rbp = motif.get("motif", "")
             motif_counts[rbp] += 1
 
+        total_seqs = len(sequences)
         results["motifs"] = [
             {
                 "motif": rbp,
                 "count": count,
-                "percentage": round(count / len(sequences) * 100, 1),
+                "percentage": round(count / total_seqs * 100, 1),
+                "significance": "detected" if count > 0 else "none",
             }
             for rbp, count in sorted(
                 motif_counts.items(), key=lambda x: x[1], reverse=True
@@ -481,7 +461,6 @@ def run_meme_enrichment_simple(
     from .motif_analysis import (
         MOTIF_DATABASE,
         analyze_sequence_motifs,
-        get_coordinates_for_event,
     )
 
     motif_counts = Counter()

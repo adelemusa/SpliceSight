@@ -12,15 +12,15 @@ try:
     from .enrichment import run_enrichment
 except ImportError:
 
-    def run_enrichment(genes):
-        return []
+    def run_enrichment(gene_symbols, gene_sets=None, pvalue_cutoff=0.1):
+        return {"pathways": [], "gene_count": 0}
 
 
 try:
     from .motif_analysis import run_motif_analysis
 except ImportError:
 
-    def run_motif_analysis(events, sample_size=None):
+    def run_motif_analysis(events, sample_size=100):
         return {}
 
 
@@ -353,7 +353,7 @@ def parse_rmats_files(
             events.extend(file_events)
             significant_genes.update(file_genes)
 
-    enrichment_results = run_enrichment(list(significant_genes))
+    enrichment_results = run_enrichment(list(significant_genes), pvalue_cutoff=0.1)
 
     events_data = [
         {
