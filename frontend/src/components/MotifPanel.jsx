@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { Info, Dna, Search, Zap, ChevronDown, ChevronUp } from 'lucide-react';
+import { Info, Dna, Search, Zap, ChevronDown, ChevronUp, Star } from 'lucide-react';
 
 const MotifPanel = ({ motifData }) => {
   const [expanded, setExpanded] = useState(false);
   const [selectedEventType, setSelectedEventType] = useState('all');
+  const [showSignificantOnly, setShowSignificantOnly] = useState(false);
 
   if (!motifData) {
     return (
@@ -24,18 +25,36 @@ const MotifPanel = ({ motifData }) => {
   const byEventType = motifData.by_event_type || {};
   const topGenes = motifData.top_genes_with_motifs || [];
   const totalAnalyzed = motifData.total_events_analyzed || 0;
+  const significantMotifs = motifData.significant_motifs || [];
+  const method = motifData.method || 'Motif scanning';
 
-  const chartData = enrichedMotifs.slice(0, 15).map(m => ({
+  const filteredMotifs = showSignificantOnly 
+    ? enrichedMotifs.filter(m => m.significant)
+    : enrichedMotifs;
+
+  const chartData = filteredMotifs.slice(0, 15).map(m => ({
     name: m.rbp,
     count: m.count,
-    percentage: m.percentage
+    percentage: m.percentage,
+    pvalue: m.pvalue || 1,
+    adjPvalue: m.adj_pvalue || 1,
+    foldEnrichment: m.fold_enrichment || 0,
+    significant: m.significant || false,
+    significance: m.significance || 'ns'
   }));
 
-  const getBarColor = (percentage) => {
-    if (percentage > 50) return '#6c5ce7';
-    if (percentage > 30) return '#00cec9';
-    if (percentage > 15) return '#a29bfe';
+  const getBarColor = (motif) => {
+    if (motif.significant) return '#00cec9';
+    if (motif.adjPvalue < 0.1) return '#6c5ce7';
+    if (motif.adjPvalue < 0.25) return '#a29bfe';
     return '#74b9ff';
+  };
+
+  const getSignificanceColor = (sig) => {
+    if (sig === '***') return '#00cec9';
+    if (sig === '**') return '#6c5ce7';
+    if (sig === '*') return '#fdcb6e';
+    return '#888';
   };
 
   const eventTypes = Object.keys(byEventType);
@@ -66,7 +85,7 @@ const MotifPanel = ({ motifData }) => {
             RBP Motif Analysis
           </h3>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '0.5rem' }}>
-            Identification of RNA-binding protein (RBP) binding motifs
+            {method} - Statistical enrichment analysis
           </p>
         </div>
         <button
@@ -106,36 +125,51 @@ const MotifPanel = ({ motifData }) => {
               (motifs) in RNA. These motifs regulate splicing, mRNA stability, localization, and translation.
             </p>
             <p style={{ margin: 0 }}>
-              This analysis shows which RBPs may be involved in the identified differential splicing events,
-              based on the presence of known motifs in the exon/intron sequences.
+              This analysis uses <strong>Fisher's exact test</strong> to identify RBPs whose motifs are 
+              statistically enriched in your splicing events compared to genome background frequencies.
             </p>
           </div>
         </div>
       )}
 
       {/* Statistics */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
         <div style={{ background: 'rgba(108, 92, 231, 0.15)', borderRadius: '8px', padding: '1rem', textAlign: 'center', border: '1px solid rgba(108, 92, 231, 0.3)' }}>
           <div style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#6c5ce7' }}>{totalAnalyzed}</div>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Events analyzed</div>
         </div>
         <div style={{ background: 'rgba(0, 206, 201, 0.15)', borderRadius: '8px', padding: '1rem', textAlign: 'center', border: '1px solid rgba(0, 206, 201, 0.3)' }}>
-          <div style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#00cec9' }}>{enrichedMotifs.length}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Motifs found</div>
+          <div style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#00cec9' }}>{significantMotifs.length}</div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Significant RBPs</div>
         </div>
         <div style={{ background: 'rgba(253, 203, 110, 0.15)', borderRadius: '8px', padding: '1rem', textAlign: 'center', border: '1px solid rgba(253, 203, 110, 0.3)' }}>
-          <div style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#fdcb6e' }}>{topGenes.length}</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Top genes</div>
+          <div style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#fdcb6e' }}>{enrichedMotifs.length}</div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total motifs</div>
+        </div>
+        <div style={{ background: 'rgba(116, 185, 255, 0.15)', borderRadius: '8px', padding: '1rem', textAlign: 'center', border: '1px solid rgba(116, 185, 255, 0.3)' }}>
+          <div style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#74b9ff' }}>{motifData.sequences_extracted || 0}</div>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Sequences</div>
         </div>
       </div>
 
       {/* Chart */}
       {chartData.length > 0 ? (
         <div style={{ marginBottom: '1.5rem' }}>
-          <h4 style={{ margin: '0 0 0.75rem 0', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-            <Search size={14} style={{ marginRight: '0.5rem', verticalAlign: 'middle' }} />
-            Enriched RBP motifs ({totalAnalyzed} events analyzed)
-          </h4>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <h4 style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+              <Search size={14} style={{ marginRight: '0.5rem', verticalAlign: 'middle' }} />
+              Enriched RBP motifs ({filteredMotifs.length} {showSignificantOnly ? 'significant' : 'total'})
+            </h4>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
+              <input 
+                type="checkbox" 
+                checked={showSignificantOnly}
+                onChange={(e) => setShowSignificantOnly(e.target.checked)}
+                style={{ accentColor: '#00cec9' }}
+              />
+              Significant only
+            </label>
+          </div>
           <div style={{ height: chartData.length > 10 ? 350 : 200 }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 30, left: 100, bottom: 5 }}>
@@ -143,12 +177,32 @@ const MotifPanel = ({ motifData }) => {
                 <XAxis type="number" stroke="#888" tickFormatter={(v) => `${v}%`} />
                 <YAxis type="category" dataKey="name" stroke="#888" width={95} tick={{ fontSize: 11 }} />
                 <Tooltip 
-                  contentStyle={{ background: 'rgba(30, 30, 50, 0.95)', border: '1px solid rgba(108, 92, 231, 0.5)', borderRadius: '8px', fontSize: '0.85rem' }}
-                  formatter={(value, name, props) => [`${value}%`, 'Frequency']}
+                  contentStyle={{ background: 'rgba(30, 30, 50, 0.95)', border: '1px solid rgba(108, 92, 231, 0.5)', borderRadius: '8px', fontSize: '0.8rem' }}
+                  formatter={(value, name, props) => [
+                    `${value}%`,
+                    'Frequency'
+                  ]}
+                  labelFormatter={(label, payload) => {
+                    if (payload && payload[0]) {
+                      const d = payload[0].payload;
+                      return (
+                        <div style={{ minWidth: 200 }}>
+                          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>{d.name}</div>
+                          <div>Count: {d.count} sequences</div>
+                          <div>Frequency: {d.percentage}%</div>
+                          <div>Fold Enrichment: {d.foldEnrichment}x</div>
+                          <div style={{ color: getSignificanceColor(d.significance) }}>
+                            {d.significance !== 'ns' ? `Significance: ${d.significance} (p_adj=${d.adjPvalue.toExponential(2)})` : `p_adj=${d.adjPvalue.toExponential(2)}`}
+                          </div>
+                        </div>
+                      );
+                    }
+                    return label;
+                  }}
                 />
                 <Bar dataKey="percentage" radius={[0, 4, 4, 0]}>
                   {chartData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={getBarColor(entry.percentage)} />
+                    <Cell key={`cell-${index}`} fill={getBarColor(entry)} />
                   ))}
                 </Bar>
               </BarChart>
@@ -158,7 +212,28 @@ const MotifPanel = ({ motifData }) => {
       ) : (
         <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
           <Zap size={32} style={{ opacity: 0.3, marginBottom: '0.5rem' }} />
-          <p style={{ margin: 0 }}>No significant motifs found</p>
+          <p style={{ margin: 0 }}>No{showSignificantOnly ? ' significant' : ''} motifs found</p>
+        </div>
+      )}
+
+      {/* Significance Legend */}
+      {expanded && (
+        <div style={{ 
+          display: 'flex', 
+          gap: '1rem', 
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          fontSize: '0.8rem',
+          color: 'var(--text-muted)',
+          padding: '0.75rem',
+          background: 'rgba(0,0,0,0.2)',
+          borderRadius: '6px'
+        }}>
+          <span style={{ fontWeight: 'bold', marginRight: '0.5rem' }}>Significance:</span>
+          <span style={{ color: '#00cec9' }}>*** p_adj &lt; 0.001</span>
+          <span style={{ color: '#6c5ce7' }}>** p_adj &lt; 0.01</span>
+          <span style={{ color: '#fdcb6e' }}>* p_adj &lt; 0.05</span>
+          <span style={{ color: '#888' }}>ns = not significant</span>
         </div>
       )}
 
